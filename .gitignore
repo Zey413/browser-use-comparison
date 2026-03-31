@@ -1,0 +1,7 @@
+.DS_Store
+browser-use/
+playwright-mcp/
+stagehand/
+openclaw/
+nanoclaw/
+.claude/
