@@ -1,7 +1,7 @@
 # Claude Code / OpenClaw 生态 Browser Use 能力 —— 三大主流方案深度对比
 
 > **调研日期**: 2026-03-31  
-> **版本**: V3（实战快速上手迭代）  
+> **版本**: V4（安全/生态/容错迭代）  
 > **调研方法**: 本地 clone 源码 + 多 Agent 并行深度阅读  
 > **作者**: AI Research Team (zey413)
 
@@ -20,6 +20,7 @@
 9. [总结与建议](#9-总结与建议)
 10. [源码级深度剖析 (V2 新增)](#10-源码级深度剖析v2-迭代新增)
 11. [实战快速上手指南 (V3 新增)](#11-实战快速上手指南v3-迭代新增)
+12. [安全模型、社区生态与容错机制 (V4 新增)](#12-安全模型社区生态与容错机制v4-迭代新增)
 
 ---
 
@@ -1298,6 +1299,181 @@ const weatherTool = tool({
 
 ---
 
-> **本报告版本**: V3 (2026-03-31)  
-> **更新内容**: V1 架构概览 → V2 源码剖析 → V3 实战快速上手  
+> **本报告版本**: V4 (2026-03-31)  
+> **更新内容**: V1 架构概览 → V2 源码剖析 → V3 实战上手 → V4 安全/生态/容错  
 > **所有项目已 clone 到本地，可随时深入查阅源码。**
+
+---
+
+## 12. 安全模型、社区生态与容错机制（V4 迭代新增）
+
+> 本章补充企业用户最关心的三个维度：生产环境安全性、社区可持续性、错误恢复能力。
+
+### 12.1 安全模型对比
+
+#### 安全边界声明
+
+| 方案 | 安全声明 | 含义 |
+|------|---------|------|
+| **Playwright MCP** | **"NOT a security boundary"** (config.d.ts L721) | 所有限制仅为便利防御，可被绕过 |
+| **browser-use** | SecurityWatchdog + Docker 多层隔离 | 企业级纵深防御 |
+| **Stagehand** | Browserbase 云端托管隔离 | SaaS 责任转移模式 |
+
+#### 7 维安全对比
+
+| 维度 | Playwright MCP | browser-use | Stagehand |
+|------|---------------|-------------|-----------|
+| **安全边界** | 非边界 | 有边界 | 云端边界 |
+| **数据隔离** | Profile + Secrets 替换 | Watchdog + Domain 策略 | Cloud API + Session UUID |
+| **敏感数据** | 明文替换（易绕过） | Domain-aware + TOTP | Variables + API Key |
+| **网络限制** | 软限制（重定向不拦截） | 强制拦截 → about:blank | API Endpoint 隔离 |
+| **容器隔离** | 无（MCP 进程） | Docker 多层 + 非特权用户 | 云端完全隔离 |
+| **文件访问** | allowUnrestrictedFileAccess | 沙箱限制 | Presigned URL 临时授权 |
+| **生产就绪** | 开发/测试 | 企业自部署 | SaaS 完全托管 |
+
+#### 敏感数据处理机制
+
+**Playwright MCP**: Secrets 便利替换
+```json
+{ "secrets": { "api_key": "sk-***" } }
+```
+Tool 返回中匹配的字符串会被替换，但 LLM 仍可通过 `browser_evaluate` 读取原始值。
+
+**browser-use**: Domain-aware 标签式 Secrets
+```xml
+<secret>label</secret>  <!-- 仅在匹配域名时注入真实值 -->
+```
+支持 TOTP 动态码生成（pyotp），递归参数替换（dict/list/str）。
+
+**Stagehand**: Variables 变量系统
+```typescript
+await stagehand.act("Type '{password}'", { variables: { password: "s3cret" } });
+// 缓存键仅包含变量名，不包含值
+```
+
+#### 安全选型建议
+
+```
+内部开发/测试      → Playwright MCP（够用，简单）
+企业自部署/合规要求 → browser-use（纵深防御，完全控制）
+零运维/信任云端     → Stagehand（SaaS 托管，责任转移）
+```
+
+---
+
+### 12.2 社区生态与可持续性
+
+#### 核心量化指标（2026-03-31）
+
+| 指标 | Playwright MCP | browser-use | Stagehand |
+|------|---------------|-------------|-----------|
+| **GitHub Stars** | 30,017 | **85,136** | 21,760 |
+| **Forks** | 2,418 | **9,865** | 1,445 |
+| **Contributors** | 62 | **305** | 37 |
+| **包月下载量** | **7.37M** (npm) | 6.32M (PyPI) | 2.73M (npm) |
+| **Open Issues** | 24 | 35 | 84 |
+| **Open PRs** | 3 | **179** | 100 |
+| **最近 commit** | 2026-03-30 | 2026-03-26 | 2026-03-31 |
+| **MCP 客户端支持** | **18+** | 需 MCP 包装 | Browserbase MCP |
+| **Python 支持** | 无 | 原生 | 有 (v0.3.10, 早期) |
+
+#### 背后公司与融资
+
+| 方案 | 公司 | 融资 | 商业产品 |
+|------|------|------|---------|
+| **Playwright MCP** | **Microsoft** | 内部项目 | 开源免费 |
+| **browser-use** | Browser-Use (初创) | 早期 | [Browser-Use Cloud](https://cloud.browser-use.com/) |
+| **Stagehand** | **Browserbase** | Series B **$40M** (估值 $3 亿) | [Browserbase Cloud](https://www.browserbase.com/) |
+
+#### 生态可持续性评估
+
+| 维度 | Playwright MCP | browser-use | Stagehand |
+|------|:---:|:---:|:---:|
+| **长期维护保障** | ⭐⭐⭐⭐⭐ (Microsoft) | ⭐⭐⭐ (初创) | ⭐⭐⭐⭐ ($40M 融资) |
+| **社区贡献活跃度** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ (305人) | ⭐⭐⭐ |
+| **包下载增长** | ⭐⭐⭐⭐⭐ (7.37M) | ⭐⭐⭐⭐⭐ (6.32M) | ⭐⭐⭐⭐ (2.73M) |
+| **MCP 生态集成** | ⭐⭐⭐⭐⭐ (18+) | ⭐⭐⭐ | ⭐⭐⭐ |
+| **商业化可行性** | N/A (免费) | ⭐⭐⭐ (起步) | ⭐⭐⭐⭐⭐ (成熟) |
+
+---
+
+### 12.3 错误处理与容错机制
+
+#### 策略对比概览
+
+| 方案 | 策略风格 | 核心理念 |
+|------|---------|---------|
+| **Playwright MCP** | **失败透传** | Tool 返回错误信息，由 LLM 客户端自行处理 |
+| **browser-use** | **主动监控** | 8+ Watchdog 组件主动检测和恢复 |
+| **Stagehand** | **智能自愈** | Self-heal 重新推理 + 缓存加速兜底 |
+
+#### 5 个关键容错特性对比
+
+| 特性 | Playwright MCP | browser-use | Stagehand |
+|------|:---:|:---:|:---:|
+| **超时控制** | 无显式超时 | 4 层超时（单步/总任务/空闲/模型自适应） | 2 层（操作/导航） |
+| **CAPTCHA 处理** | 无 | ✅ 120 秒自动等待 + 视觉检测 | 无 |
+| **死循环检测** | 无 | ✅ replan nudge 重新规划 | maxSteps 硬限制 |
+| **自愈机制** | 无 | 无 | ✅ 重新快照→重新 LLM→新选择器→重试 |
+| **缓存加速** | 无 | 无 | ✅ ActCache 10x+ 重复操作加速 |
+
+#### 错误处理详情
+
+**Playwright MCP** — 最小化设计
+```
+Tool 调用 → 成功: {result, code, snapshot}
+           → 失败: {error: "Element not found", ...}
+```
+- 所有容错逻辑交给 LLM 客户端（如 Claude）
+- Claude 收到错误后自行决定重试策略
+- 适合稳定网站的简单操作
+
+**browser-use** — 8+ Watchdog 主动监控
+```
+Agent.step() 执行
+  ├── SecurityWatchdog: URL 策略检查
+  ├── TimeoutWatchdog: 4 层超时保护
+  │   ├── 单步超时（模型自适应: Claude 60s, GPT 30s）
+  │   ├── 总任务超时
+  │   ├── 空闲检测
+  │   └── 页面加载超时
+  ├── LoopDetector: 连续相同操作 → replan nudge
+  ├── CAPTCHADetector: 截图分析 → 120s 等待
+  └── DOMWatchdog: DOM 变化追踪
+```
+
+**Stagehand** — Self-heal 自愈
+```
+act("click login") 
+  → 首次尝试失败（选择器无效）
+  → 自动触发 Self-heal:
+    1. 重新捕获 A11y 快照
+    2. 重新调用 LLM 获取新选择器  
+    3. 用新选择器重试
+  → 成功 → 自动更新缓存
+```
+
+#### 容错选型建议
+
+```
+网站稳定 + 简单操作    → Playwright MCP（LLM 自行处理错误即可）
+长时间运行 + 复杂网站  → browser-use（Watchdog 全方位保护）
+高频重复 + 需要速度    → Stagehand（Self-heal + Cache 双保险）
+```
+
+---
+
+### 12.4 综合评分矩阵（V4 最终版）
+
+| 维度 | 权重 | Playwright MCP | browser-use | Stagehand |
+|------|:---:|:---:|:---:|:---:|
+| **Claude Code 集成** | 20% | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐⭐ (8) | ⭐⭐⭐ (6) |
+| **安全性** | 15% | ⭐⭐ (4) | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐⭐ (8) |
+| **社区生态** | 15% | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐⭐ (8) |
+| **容错能力** | 15% | ⭐⭐ (4) | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐⭐ (8) |
+| **成本效益** | 15% | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐ (6) | ⭐⭐⭐⭐ (8) |
+| **性能** | 10% | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐ (6) | ⭐⭐⭐⭐ (8) |
+| **学习曲线** | 10% | ⭐⭐⭐⭐⭐ (10) | ⭐⭐⭐⭐ (8) | ⭐⭐⭐ (6) |
+| **加权总分** | 100% | **8.1** | **8.4** | **7.4** |
+
+> **结论**: browser-use 综合得分最高（8.4），在安全性和容错能力上显著领先；Playwright MCP 紧随其后（8.1），在集成便利性和成本效益上占优；Stagehand 综合均衡（7.4），在缓存优化和云端部署上有独特优势。
