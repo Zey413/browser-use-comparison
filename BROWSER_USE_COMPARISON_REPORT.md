@@ -1,6 +1,7 @@
 # Claude Code / OpenClaw 生态 Browser Use 能力 —— 三大主流方案深度对比
 
 > **调研日期**: 2026-03-31  
+> **版本**: V2（源码级深度剖析迭代）  
 > **调研方法**: 本地 clone 源码 + 多 Agent 并行深度阅读  
 > **作者**: AI Research Team (zey413)
 
@@ -17,6 +18,7 @@
 7. [补充方案：OpenClaw / NanoClaw / copilot-computer-use / apex-browser-agent](#7-补充方案)
 8. [选型指南](#8-选型指南)
 9. [总结与建议](#9-总结与建议)
+10. [源码级深度剖析 (V2 新增)](#10-源码级深度剖析v2-迭代新增)
 
 ---
 
@@ -619,3 +621,399 @@ stagehand/
 
 > **本报告基于 2026-03-31 的源码分析，项目持续更新中。**  
 > **所有项目已 clone 到本地，可随时深入查阅源码。**
+
+---
+
+## 10. 源码级深度剖析（V2 迭代新增）
+
+> 本章基于多 Agent 并行深度阅读三个项目的源码，提取了**代码级实现细节**，是上面架构分析的硬核补充。
+
+### 10.1 Playwright MCP — 源码解剖
+
+#### 10.1.1 核心实现迁移至 playwright-core
+
+```javascript
+// packages/playwright-mcp/index.js — 仅 2 行有效代码
+const { createConnection } = require('playwright-core/lib/tools/exports');
+module.exports = { createConnection };
+```
+
+**关键发现**: 所有 MCP 服务器逻辑已迁入 `playwright-core`，本仓库仅是 npm 包装器 + Chrome 扩展。这意味着 MCP 功能直接与 Playwright 版本同步，无需额外维护。
+
+#### 10.1.2 无障碍树快照的真实格式
+
+从测试用例 `core.spec.ts` 中提取的真实输出格式：
+
+```
+generic [active] [ref=e1]: Hello, world!
+- button "Submit" [ref=e2]
+- textbox "Username" [ref=e3]
+- link "FAQ" [ref=e4] → https://example.com
+```
+
+**每个元素包含**：
+- `ref=eN` — 唯一引用 ID，后续 tool 调用通过此 ID 定位
+- ARIA 角色（button/textbox/link/heading...）
+- 可访问名称（双引号中的文本）
+- 状态标记（`[active]`/`[focused]`/`[checked]`）
+
+#### 10.1.3 Tool 调用的返回格式（9 个字段）
+
+每个 tool 调用返回的标准化响应：
+```typescript
+{
+  error?: string,          // 错误信息（成功时为空）
+  result?: string,         // 文本结果
+  code?: string,           // 等效的 Playwright 代码（可直接复用）
+  snapshot?: string,       // 操作后的新页面快照
+  consoleMessages?: [],    // 浏览器控制台消息
+  networkRequests?: [],    // 发生的网络请求
+  screenshot?: string,     // base64 截图（可选）
+  pdf?: string,           // PDF 内容（可选）
+  tracing?: string,       // 追踪数据（可选）
+}
+```
+
+**亮点**: `code` 字段会返回等效的 Playwright 代码，如 `await page.getByRole('button', { name: 'Login' }).click();`，可直接用于自动化脚本。
+
+#### 10.1.4 Chrome 扩展 CDP 桥接实现
+
+```
+MCP Server ←→ WebSocket ←→ Chrome Extension ←→ chrome.debugger API ←→ 目标标签页
+```
+
+**关键文件**：
+- `packages/extension/src/background.ts` (222 行) — 消息路由和生命周期
+- `packages/extension/src/relayConnection.ts` (179 行) — 双向 JSON-RPC 转发
+
+**安全防护**: 3 层（系统页面过滤、连接超时、状态徽章反馈）
+
+#### 10.1.5 配置类型系统 (config.d.ts)
+
+```typescript
+interface Config {
+  browser?: {
+    browserName?: 'chromium' | 'firefox' | 'webkit';
+    isolated?: boolean;                 // 隔离会话 vs 持久化
+    userDataDir?: string;
+    launchOptions?: LaunchOptions;
+    contextOptions?: BrowserContextOptions;
+  };
+  server?: { port?: number; host?: string; };
+  capabilities?: ToolCapability[];       // 12 种能力开关
+  network?: {
+    allowedOrigins?: string[];           // 白名单
+    blockedOrigins?: string[];           // 黑名单
+  };
+  secrets?: Record<string, string>;      // 敏感数据替换映射
+}
+
+// 12 种能力枚举
+type ToolCapability = 'core' | 'tabs' | 'pdf' | 'vision' 
+  | 'storage' | 'network' | 'devtools' | 'testing' | 'config' | ...;
+```
+
+---
+
+### 10.2 browser-use — 源码解剖
+
+#### 10.2.1 Agent 核心循环 (service.py:1023)
+
+Agent 采用 **3 阶段设计**: 上下文准备 → LLM 调用 → 后处理
+
+```python
+# browser_use/agent/service.py — Agent.step() 核心
+async def step(self):
+    # 阶段 1: 上下文准备
+    state = await self.browser_session.get_state()  # DOM + 截图
+    messages = self._build_messages(state)           # 构建 prompt
+    
+    # 阶段 2: LLM 调用
+    response = await self.llm.ainvoke(messages)
+    action = self._parse_action(response)            # 解析动作
+    
+    # 阶段 3: 后处理
+    if action.is_captcha():
+        await self._handle_captcha()                 # CAPTCHA 自动处理
+    result = await self.controller.execute(action)   # 执行浏览器操作
+    self.history.append(result)                      # 记录历史
+```
+
+**CAPTCHA 处理**: Agent 检测到 CAPTCHA 时会自动截图并用视觉模型分析，尝试自动解决。
+
+#### 10.2.2 DOM 6 层智能压缩管道
+
+从 100KB+ 压缩到 40KB 的 6 步过程（`browser_use/dom/serializer/`）：
+
+```
+原始 DOM (100KB+)
+    ↓ 第 1 层: 不可见元素过滤 (display:none, visibility:hidden)
+    ↓ 第 2 层: 重影元素去除 (position:absolute 覆盖的重复元素)
+    ↓ 第 3 层: 顺序优化 (按视觉阅读顺序重排)
+    ↓ 第 4 层: 非交互元素简化 (纯装饰性元素移除)
+    ↓ 第 5 层: JSON 序列化 (保留最小必要属性)
+    ↓ 第 6 层: Markdown 清洁 (去除冗余标签和空白)
+压缩后 (~40KB, 压缩率 60%)
+```
+
+**BBox 去重算法**: O(n^2) 实现，对比每对元素的边界框，移除被完全覆盖的重影元素。
+
+#### 10.2.3 System Prompt 工厂（9 个模板）
+
+根据不同 LLM 能力自适应选择 prompt 大小：
+
+| 模板 | 大小 | 适用模型 |
+|------|------|---------|
+| **Browser-Use (微调)** | 1.2 KB | ChatBrowserUse 专用 |
+| **Flash (快速)** | 2.4 KB | Gemini Flash 等轻量模型 |
+| **Standard** | 8 KB | GPT-4o, Claude Sonnet |
+| **Claude (完整)** | 24 KB | Claude Opus (上下文充裕) |
+
+**条件选择逻辑**: 根据 `model_name` 前缀自动匹配最优模板。
+
+#### 10.2.4 Watchdog 事件驱动系统（15 个组件）
+
+```python
+# 核心: 发布-订阅模式的 EventBus
+class EventBus:
+    def subscribe(self, event_type: str, callback: Callable): ...
+    def publish(self, event_type: str, data: Any): ...
+
+# 15 个 Watchdog 组件通过事件总线解耦：
+# DOMWatchdog — 监控 DOM 变化
+# DownloadsWatchdog — 监控文件下载
+# NavigationWatchdog — 监控页面导航
+# TimeoutWatchdog — 单步/总任务超时
+# LoopDetector — 连续相同操作检测
+# TokenBudgetWatchdog — Token 使用量控制
+# ... 等共 15 个
+```
+
+#### 10.2.5 MCP Server 实现（30+ 工具）
+
+```python
+# browser_use 暴露的 MCP 工具入口
+# 30+ 工具通过工具路由分发到对应的 handler
+class BrowserUseMCPServer:
+    tools = [
+        "navigate", "click", "type", "scroll",
+        "extract_text", "extract_data", "screenshot",
+        "wait_for_element", "run_agent_task",  # Agent 模式
+        # ... 30+ 工具
+    ]
+```
+
+---
+
+### 10.3 Stagehand — 源码解剖
+
+#### 10.3.1 act() 四步执行流程
+
+```typescript
+// packages/core/lib/v3/handlers/actHandler.ts
+async act(instruction: string, variables?: Variables) {
+  // 第 1 步: 捕获混合快照 (A11y Tree + XPath Map)
+  const { combinedTree, combinedXpathMap } = 
+    await captureHybridSnapshot(page, { experimental: true });
+
+  // 第 2 步: 构建 prompt 并调用 LLM
+  const actInstruction = buildActPrompt(
+    instruction,
+    Object.values(SupportedUnderstudyAction),  // 可用操作列表
+    variables,
+  );
+  const { action } = await this.getActionFromLLM({
+    instruction: actInstruction,
+    domElements: combinedTree,
+    xpathMap: combinedXpathMap,
+    llmClient,
+  });
+
+  // 第 3 步: 元素 ID → XPath → 执行 Playwright 方法
+  const result = await this.takeDeterministicAction(action, page, ...);
+
+  // 第 4 步: 失败时触发自愈 (Self-heal)
+  if (!result.success && this.selfHeal) {
+    // 重新快照 → 重新 LLM 推理 → 新选择器 → 重试
+  }
+}
+```
+
+**自愈机制**: 当操作失败时，自动重新快照、重新 LLM 推理获取新选择器、重试操作。
+
+#### 10.3.2 缓存键生成和回放 (ActCache)
+
+```typescript
+// packages/core/lib/v3/cache/ActCache.ts
+private buildActCacheKey(instruction: string, url: string, variableKeys: string[]): string {
+  const payload = JSON.stringify({
+    instruction,         // 规范化指令
+    url,                // 当前页面 URL
+    variableKeys,       // 变量键数组（已排序，值不参与 key）
+  });
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+// 回放流程:
+// 1. 计算 SHA256 缓存键
+// 2. 读取 {key}.json 文件
+// 3. 验证版本号 + 变量键匹配
+// 4. 等待缓存的选择器在 DOM 中出现
+// 5. 执行缓存的操作序列
+// 6. 如果选择器变化，自动刷新缓存条目
+```
+
+**核心洞察**: 缓存键包含变量**键名**但不包含**值**，这意味着 `act("Type '{user}'", {user:"Alice"})` 和 `act("Type '{user}'", {user:"Bob"})` 共享同一缓存。
+
+#### 10.3.3 extract() Zod Schema 集成
+
+```typescript
+// packages/core/lib/v3/handlers/extractHandler.ts
+
+// 创新点: URL 字段自动转换为数字 ID
+const [transformedSchema, urlFieldPaths] = 
+  transformUrlStringsToNumericIds(objectSchema);
+// z.string().url() → z.number()
+// LLM 生成数字 ID，后续映射回真实 URL
+// 原因: LLM 难以精确生成长 URL，数字 ID 更可靠
+
+// Zod v3/v4 双版本兼容
+function toJsonSchema(schema: StagehandZodSchema): JsonSchemaDocument {
+  if (!isZod4Schema(schema)) {
+    return zodToJsonSchema(schema);      // Zod v3
+  }
+  return z.toJSONSchema(schema);          // Zod v4 内置
+}
+```
+
+#### 10.3.4 Agent 三种模式的工具集对比
+
+```typescript
+// packages/core/lib/v3/agent/tools/index.ts
+function filterTools(tools: ToolSet, mode: AgentToolMode): ToolSet {
+  if (mode === "dom") {
+    // DOM 模式: 移除坐标工具，保留语义工具
+    delete tools.click;           // ← 移除
+    delete tools.type;            // ← 移除
+    // 保留: act, fillForm, extract, ariaTree
+  }
+  if (mode === "hybrid") {
+    // Hybrid 模式: 移除 DOM 工具，保留坐标工具
+    delete tools.fillForm;        // ← 移除，用 fillFormVision 替代
+    // 保留: act, click, type, dragAndDrop, extract, ariaTree
+  }
+  // CUA 模式: 由专门的 V3CuaAgentHandler 处理
+}
+```
+
+| 工具 | DOM | Hybrid | CUA |
+|------|:---:|:------:|:---:|
+| act (语义操作) | ✅ | ✅ | - |
+| fillForm (DOM) | ✅ | - | - |
+| click (坐标) | - | ✅ | ✅ |
+| type (坐标) | - | ✅ | ✅ |
+| extract | ✅ | ✅ | ✅ |
+| ariaTree | ✅ | ✅ | ✅ |
+| fillFormVision | - | ✅ | - |
+
+#### 10.3.5 DeepLocator 跨 iframe 定位
+
+```typescript
+// packages/core/lib/v3/understudy/deepLocator.ts
+
+// 支持三种选择器语法:
+// 1. 简单: "#button"
+// 2. 链式: "iframe#A >> iframe#B >> #btn"
+// 3. XPath: "/html/body/iframe[1]//div[@id='btn']"
+
+async function resolveDeepXPathTarget(page, root, xpathOrSelector) {
+  const steps = parseXPath(xpathOrSelector);
+  let frameLocator;
+  let buffer = [];
+  
+  for (const step of steps) {
+    buffer.push(step);
+    if (step.name === "iframe") {
+      // 遇到 iframe 边界 → 切换 frame context
+      const selector = "xpath=" + buildXPath(buffer);
+      frameLocator = frameLocator 
+        ? frameLocator.frameLocator(selector)
+        : page.frameLocator(selector);
+      buffer = [];  // 重置缓冲，开始新 frame 内的路径
+    }
+  }
+  
+  // 返回最终 frame + 剩余选择器
+  return { frame: await frameLocator.resolveFrame(), selector: buildXPath(buffer) };
+}
+```
+
+**DeepLocatorDelegate**: 懒加载代理，每次操作前动态解析选择器，适应 iframe 刷新。
+
+#### 10.3.6 LLM 多后端统一接口 (15+ 提供商)
+
+```typescript
+// packages/core/lib/v3/llm/LLMProvider.ts
+getClient(modelName: string, clientOptions?: {}): LLMClient {
+  if (modelName.includes("/")) {
+    // 新格式: "openai/gpt-4.1" → AI SDK 统一路由
+    const [provider, model] = modelName.split("/");
+    const languageModel = getAISDKLanguageModel(provider, model, clientOptions);
+    return new AISdkClient({ model: languageModel });
+  }
+  // 旧格式: 直接模型名 → 专用客户端 (向后兼容)
+}
+
+// 支持的 AI SDK 提供商:
+// openai, anthropic, google, xai, azure, groq, cerebras,
+// togetherai, mistral, deepseek, perplexity, ollama,
+// vertex, bedrock, gateway — 共 15+
+```
+
+#### 10.3.7 observe() 页面分析实现
+
+```typescript
+// packages/core/lib/v3/handlers/observeHandler.ts
+async observe(params) {
+  // 默认指令（若用户未提供）:
+  const defaultInstruction = 
+    "Find elements that can be used for any future actions. " +
+    "Navigation links, buttons, or other interactive elements. " +
+    "Be comprehensive: return all relevant elements.";
+
+  // 捕获 A11y Tree
+  const snapshot = await captureHybridSnapshot(page, { experimental: true });
+  // 返回格式示例:
+  // [1-25] button "Click me" <button@click>
+  // [1-26] link "FAQ" <a@href=https://...>
+  // [1-27] iframe "@id=paymentFrame"
+  //   [1-28]   input "Card Number" <input@type=text>
+
+  // LLM 推理: 返回元素 ID + 推荐方法 + 参数
+  const observationResponse = await runObserve({
+    instruction, domElements: snapshot.combinedTree,
+    supportedActions: Object.values(SupportedUnderstudyAction),
+  });
+
+  // 元素 ID → XPath 选择器转换
+  return observationResponse.elements.map(el => ({
+    ...el,
+    selector: `xpath=${snapshot.combinedXpathMap[el.elementId]}`,
+  }));
+}
+```
+
+---
+
+### 10.4 三方案源码级对比总结
+
+| 源码维度 | Playwright MCP | browser-use | Stagehand |
+|---------|---------------|-------------|-----------|
+| **代码架构** | 薄包装器 + playwright-core | 事件驱动 EventBus | 处理器模式 (Handler) |
+| **DOM 处理** | Playwright 内置 A11y Tree | 6 层递进压缩管道 | Hybrid A11y + XPath Map |
+| **LLM 交互** | 无（纯结构化数据） | 3 阶段循环 + 9 套 Prompt | 4 个 Handler 各自调 LLM |
+| **错误恢复** | Playwright 内置重试 | Watchdog 事件发布-订阅 | Self-heal 自愈机制 |
+| **缓存策略** | 无 | 无 | SHA256 多维缓存键 |
+| **类型安全** | config.d.ts 类型定义 | Python Pydantic | Zod Schema + URL ID 映射 |
+| **扩展性** | 12 种 Capability 开关 | Watchdog 插件化 | Tool 集模式化过滤 |
+| **设计模式** | 延迟绑定 + JSON-RPC | 发布-订阅 + 工厂 | 处理器 + 策略 + 代理 |
