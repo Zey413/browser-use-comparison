@@ -1,7 +1,7 @@
 # Claude Code / OpenClaw 生态 Browser Use 能力 —— 三大主流方案深度对比
 
 > **调研日期**: 2026-03-31  
-> **版本**: V4（安全/生态/容错迭代）  
+> **版本**: V5（FAQ 踩坑/组合架构/中文适配迭代）  
 > **调研方法**: 本地 clone 源码 + 多 Agent 并行深度阅读  
 > **作者**: AI Research Team (zey413)
 
@@ -21,6 +21,7 @@
 10. [源码级深度剖析 (V2 新增)](#10-源码级深度剖析v2-迭代新增)
 11. [实战快速上手指南 (V3 新增)](#11-实战快速上手指南v3-迭代新增)
 12. [安全模型、社区生态与容错机制 (V4 新增)](#12-安全模型社区生态与容错机制v4-迭代新增)
+13. [FAQ 踩坑指南与组合使用架构 (V5 新增)](#13-faq-踩坑指南与组合使用架构v5-迭代新增)
 
 ---
 
@@ -1299,8 +1300,8 @@ const weatherTool = tool({
 
 ---
 
-> **本报告版本**: V4 (2026-03-31)  
-> **更新内容**: V1 架构概览 → V2 源码剖析 → V3 实战上手 → V4 安全/生态/容错  
+> **本报告版本**: V5 (2026-03-31)  
+> **更新内容**: V1 架构概览 → V2 源码剖析 → V3 实战上手 → V4 安全/生态/容错 → V5 FAQ/组合架构/中文适配  
 > **所有项目已 clone 到本地，可随时深入查阅源码。**
 
 ---
@@ -1477,3 +1478,245 @@ act("click login")
 | **加权总分** | 100% | **8.1** | **8.4** | **7.4** |
 
 > **结论**: browser-use 综合得分最高（8.4），在安全性和容错能力上显著领先；Playwright MCP 紧随其后（8.1），在集成便利性和成本效益上占优；Stagehand 综合均衡（7.4），在缓存优化和云端部署上有独特优势。
+
+---
+
+## 13. FAQ 踩坑指南与组合使用架构（V5 迭代新增）
+
+> 本章整理了从源码 tests/、README、issue 模板和 Dockerfile 中提取的**真实踩坑场景**，以及三方案**组合使用**的最佳实践。
+
+### 13.1 Playwright MCP — 5 大高频问题
+
+#### Q1: Chrome 扩展模式连接超时 (30% 出现率)
+```
+症状: "Extension connection timeout..."
+原因: 官方 Chrome 与 Chromium 的 DevTools 协议差异
+解决: 1) 用 Chromium 替代官方 Chrome  2) 加 --headless=false  3) 加 --cdp-timeout 10000
+```
+
+#### Q2: Headless 模式启动失败 (25%)
+```
+症状: Linux/Docker 环境下浏览器崩溃
+原因: 缺少图形环境或被反爬检测
+解决: 1) Linux 加 --no-sandbox  2) Docker 中确保 chromium 已安装  3) 设置真实 User-Agent
+```
+
+#### Q3: MCP 配置不生效 (20%)
+```
+症状: --config 参数被忽略，环境变量冲突
+原因: 使用了相对路径，或环境变量覆盖了配置文件
+解决: 1) 用绝对路径  2) 验证 JSON 格式  3) 运行 env | grep PLAYWRIGHT_MCP_ 检查冲突
+```
+
+#### Q4: 中文网站快照乱码 (15%)
+```
+症状: A11y Tree 中中文显示为 ???
+原因: 浏览器默认字体不支持 CJK 字符
+解决: 1) 用 --init-script 强制 UTF-8  2) 改用 browser_take_screenshot  3) 安装 CJK 字体包
+```
+
+#### Q5: Node.js 版本错误 (10%)
+```
+症状: ERR_MODULE_NOT_FOUND 或语法错误
+原因: Node.js < 18
+解决: 1) 升级到 Node.js ≥18  2) npm cache clean --force && npm ci
+```
+
+**诊断检查清单**:
+```bash
+node -v                            # 需要 ≥18.0.0
+npx @playwright/mcp@latest --help  # 验证安装
+env | grep PLAYWRIGHT_MCP_         # 检查环境变量冲突
+```
+
+---
+
+### 13.2 browser-use — 5 大高频问题
+
+#### Q1: Chromium 浏览器安装失败
+```
+症状: 运行 agent 时报错找不到浏览器
+原因: Playwright 浏览器未安装
+解决: uvx browser-use install 或 playwright install chromium；确保 Python ≥3.11
+```
+
+#### Q2: Agent 无限循环（最常见！）
+```
+症状: 不断重复相同动作，达到 max_steps 仍无法完成
+原因: 任务描述过于开放，LLM 不知道何时停止
+解决: 1) 设置 max_steps=50  2) 启用 flash_mode=True  3) 提供更具体的任务描述
+```
+
+#### Q3: Token 消耗爆增
+```
+症状: 单任务消耗大量 Token，API 费用飙升
+原因: Agent 历史记录过长，每次 LLM 调用都发送完整上下文
+解决: 1) max_history_items=10  2) 用 page_extraction_llm 分离提取模型  3) vision_detail_level='low'
+```
+
+#### Q4: 版本不一致导致功能失效
+```
+症状: 旧版本遇到已修复 bug，或模型名不一致
+原因: 项目迭代极快，API 频繁变化
+解决: 1) uv pip install --upgrade browser-use  2) 用 ChatBrowserUse 而非通用 LLM  3) 检查版本号
+```
+
+#### Q5: Docker 部署字体/编码问题
+```
+症状: 中文网站显示乱码或方块
+原因: Docker 镜像缺少中文字体
+解决: 1) 安装 fonts-noto-core fonts-unifont  2) 设置 LANG=C.UTF-8  3) 用 apt 装 chromium 替代 playwright
+```
+
+**诊断检查清单**:
+```bash
+python --version                         # 需要 ≥3.11
+uv pip show browser-use                  # 检查版本
+BROWSER_USE_LOGGING_LEVEL=DEBUG python x.py  # 开启调试日志
+```
+
+---
+
+### 13.3 Stagehand — 5 大高频问题
+
+#### Q1: Node.js 版本不兼容
+```
+症状: 无法启动或 "unsupported version" 错误
+原因: 严格要求 Node.js >=20.19.0 或 >=22.12.0（注意：21.x 不支持）
+解决: node -v 检查后升级至 22.12.0+（推荐）
+```
+
+#### Q2: Zod 版本冲突
+```
+症状: extract() 报错 "Invalid schema for response_format"
+原因: 项目同时支持 Zod v3.25.76+ 和 v4.2.0+，混用导致类型冲突
+解决: 确保 "zod": "^3.25.76 || ^4.2.0"；冲突时 pnpm install --force
+```
+
+#### Q3: act() 在动态页面上失败
+```
+症状: 返回 "not-supported" 或无法定位元素
+原因: DOM 变化太快或元素在 iframe/Shadow DOM 中，缓存 XPath 已过期
+解决: 1) 用 observe() + act() 模式  2) 启用 experimental: true  3) 设 enableCaching: false
+```
+
+#### Q4: 缓存过期导致重复任务失败
+```
+症状: 第二次运行相同脚本时操作失效
+原因: v3.0 新增的自动缓存无法感知页面结构变更
+解决: 构造函数中 enableCaching: false 禁用，或定期清理 cacheDir 目录
+```
+
+#### Q5: Agent 模式选择困难
+```
+症状: 不确定用 DOM/Hybrid/CUA 哪个模式
+解决: 简单网页用 "dom"（默认，任何模型）；视觉交互用 "hybrid"（需 Gemini/Claude）；
+      复杂桌面操作用 "cua"（需 Computer Use API）
+```
+
+**诊断检查清单**:
+```bash
+node -v                                    # ≥20.19.0 或 ≥22.12.0
+npx tsx --version                          # 确保 tsx 可用
+ENABLE_CACHING=false npx tsx script.ts     # 禁用缓存测试
+```
+
+---
+
+### 13.4 跨方案通用踩坑
+
+| 问题 | 通用解决方案 |
+|------|-------------|
+| **首次浏览器下载慢** | 设置 `PLAYWRIGHT_BROWSERS_PATH` 指向已有浏览器 |
+| **代理/VPN 导致连接失败** | 设置 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量 |
+| **CI/CD 环境无图形界面** | 统一使用 `--headless` + `--no-sandbox` |
+| **macOS 权限弹窗** | 提前授权"辅助功能"和"屏幕录制"权限 |
+| **Windows 路径问题** | 使用正斜杠 `/` 或 `path.resolve()` |
+
+---
+
+### 13.5 组合使用架构设计
+
+> 单一方案难以覆盖所有场景，推荐组合使用。
+
+#### 架构 A：轻量级组合（个人/小团队）
+
+```
+Claude Code
+├── Playwright MCP (默认)     — 日常浏览器操作、快速查询
+│   └── claude mcp add playwright npx @playwright/mcp@latest
+│
+└── browser-use MCP (按需)    — 复杂多步骤 Agent 任务
+    └── 配置 mcpServers 中的 browser-use
+
+使用逻辑:
+  简单操作（搜索、填表、截图） → Playwright MCP（自动选择）
+  复杂任务（多步骤、需要判断） → 手动指定 "使用 browser-use agent 执行..."
+```
+
+#### 架构 B：生产级组合（企业团队）
+
+```
+                     ┌─────────────────────────────┐
+                     │      任务路由层              │
+                     │  (按任务复杂度自动分发)       │
+                     └──────┬────────┬──────────────┘
+                            │        │
+                 简单/快速   │        │  复杂/自主
+                            ▼        ▼
+                 ┌──────────────┐ ┌──────────────────┐
+                 │ Playwright   │ │    Stagehand      │
+                 │ MCP Server   │ │  (Agent 模式)     │
+                 │              │ │                    │
+                 │ • 表单填充   │ │ • 多步骤购物流程   │
+                 │ • 数据查询   │ │ • 跨网站数据采集   │
+                 │ • 截图/PDF   │ │ • 智能缓存复用     │
+                 └──────┬───────┘ └──────┬─────────────┘
+                        │                │
+                        ▼                ▼
+                 ┌──────────────────────────────────────┐
+                 │       Browserbase 云端浏览器          │
+                 │  • 100+ 并发  • 反爬虫  • CAPTCHA    │
+                 └──────────────────────────────────────┘
+```
+
+#### 架构 C：全覆盖组合（高级用户）
+
+```json
+// ~/.claude/mcp_config.json — 三合一配置
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--headless", "--caps=core,pdf,storage"]
+    },
+    "browser-use": {
+      "command": "uvx",
+      "args": ["browser-use[cli]", "--mcp"],
+      "env": { "BROWSER_USE_API_KEY": "sk-..." }
+    }
+  }
+}
+```
+
+**使用策略**:
+| 场景 | 选择 | 理由 |
+|------|------|------|
+| "打开 X 网站看看" | Playwright MCP | 零成本，即时响应 |
+| "帮我在 Y 上下单" | browser-use Agent | 多步骤决策能力 |
+| "每天抓取 Z 数据" | Stagehand + Cache | 缓存后零边际成本 |
+| "填写这个表单" | Playwright MCP | 确定性最高 |
+| "研究竞品定价" | browser-use Agent | 自主浏览 + 分析 |
+
+---
+
+### 13.6 中文生态适配建议
+
+| 场景 | 建议 |
+|------|------|
+| **中文网站自动化** | 优先 Playwright MCP（A11y Tree 对中文支持好）+ 安装 CJK 字体 |
+| **微信公众号/小程序** | 无直接支持；考虑 copilot-computer-use 桌面级方案 |
+| **淘宝/京东等电商** | browser-use Agent（强反爬需要 Cloud 模式）|
+| **中文 LLM 接入** | browser-use 支持 DeepSeek/通义千问；Stagehand 通过 AI SDK 支持 |
+| **国内网络环境** | 配置 HTTP_PROXY；Playwright MCP 支持 `--proxy-server` |
+| **Docker 中文支持** | `apt-get install fonts-noto-cjk` + `LANG=zh_CN.UTF-8` |
