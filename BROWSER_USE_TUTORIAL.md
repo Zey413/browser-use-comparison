@@ -2,7 +2,7 @@
 
 > **面向**: 想立刻上手的开发者  
 > **前置阅读**: [对比报告](BROWSER_USE_COMPARISON_REPORT.md)（可选）  
-> **日期**: 2026-03-31
+> **日期**: 2026-03-31 | **版本**: V2
 
 ---
 
@@ -12,6 +12,7 @@
 - [Part 2: browser-use 使用教程](#part-2-browser-use-使用教程)
 - [Part 3: Stagehand 使用教程](#part-3-stagehand-使用教程)
 - [Part 4: 场景速查表](#part-4-场景速查表)
+- [Part 5: 进阶工作流与高级技巧 (V2 新增)](#part-5-进阶工作流与高级技巧)
 
 ---
 
@@ -1071,4 +1072,307 @@ const stagehand = new Stagehand({
     }
   }
 }
+```
+
+---
+
+# Part 5: 进阶工作流与高级技巧
+
+> V2 新增：三个方案的进阶用法，涵盖多标签页、会话持久化、敏感数据、文件操作、分页提取、错误处理等。
+
+## 5.1 Playwright MCP 进阶
+
+### 多标签页操作
+
+```
+你: "打开 GitHub 和 Stack Overflow 两个标签页，对比搜索结果"
+
+Claude:
+→ browser_navigate("https://github.com")
+→ browser_tabs({ action: "create" })            # 创建新标签
+→ browser_navigate("https://stackoverflow.com")
+→ browser_tabs({ action: "list" })               # 列出所有标签
+→ browser_tabs({ action: "select", index: 0 })   # 切回第一个标签
+→ browser_snapshot()                             # 获取 GitHub 页面
+→ browser_tabs({ action: "select", index: 1 })   # 切到 SO
+→ browser_snapshot()                             # 获取 SO 页面
+```
+
+### Storage State 导出/导入（跨 session 保存登录）
+
+```bash
+# 需要启用 storage 能力
+npx @playwright/mcp@latest --caps=core,storage
+```
+
+```
+# Session 1：登录并保存状态
+→ browser_navigate("https://app.example.com/login")
+→ browser_type(ref="e1", text="user@example.com")
+→ browser_type(ref="e2", text="password")
+→ browser_click(ref="e3")
+→ browser_storage_state(filename="auth.json")     # 导出 cookies + localStorage
+
+# Session 2：恢复（无需再次登录）
+→ browser_set_storage_state(filename="auth.json")  # 导入
+→ browser_navigate("https://app.example.com/dashboard")  # 自动已登录
+```
+
+### 库模式编程（Node.js 中直接使用）
+
+```javascript
+const { createConnection } = require("@playwright/mcp");
+
+const server = await createConnection({
+  browser: { browserName: "chromium", launchOptions: { headless: true } },
+  capabilities: ["core", "storage", "pdf"]
+});
+
+// 在代码中直接调用 MCP 工具
+const result = await server.callTool("browser_navigate", { url: "https://example.com" });
+const snapshot = await server.callTool("browser_snapshot", {});
+console.log(snapshot.text);
+```
+
+### 执行自定义 Playwright 代码
+
+```
+→ browser_run_code({
+    code: `async ({ page }) => {
+      const rows = await page.$$eval('table tr', rows =>
+        rows.map(r => Array.from(r.querySelectorAll('td')).map(td => td.textContent))
+      );
+      return JSON.stringify(rows);
+    }`
+  })
+# 返回表格中所有单元格数据
+```
+
+### 连接远程 CDP 端点
+
+```bash
+# 先用 --remote-debugging-port 启动 Chrome
+npx @playwright/mcp@latest --cdp-endpoint http://localhost:9222
+```
+
+---
+
+## 5.2 browser-use 进阶
+
+### 敏感数据处理（Secrets，按域名映射）
+
+```python
+sensitive_data = {
+    'github.com': { 'username': 'myuser', 'password': 'myP@ssw0rd' },
+    'bank.com': { 'account': '1234567890' }
+}
+
+agent = Agent(
+    task="Login to GitHub with my credentials",
+    llm=ChatBrowserUse(),
+    sensitive_data=sensitive_data  # Agent 只看到占位符，真实值仅在匹配域注入
+)
+await agent.run()
+```
+
+### 2FA/TOTP 自动处理
+
+```python
+# browser-use 自动将 TOTP secret 转换为 6 位验证码
+sensitive_data = {'bu_2fa_code': 'JBSWY3DPEHPK3PXP'}
+
+agent = Agent(
+    task="Login and enter the 2FA code: bu_2fa_code",
+    llm=ChatBrowserUse(),
+    sensitive_data=sensitive_data
+)
+```
+
+### 文件下载
+
+```python
+browser = Browser(downloads_path='~/Downloads/tmp')
+agent = Agent(task='Download the PDF report', llm=ChatBrowserUse(), browser=browser)
+await agent.run()
+```
+
+### 域名白名单/黑名单
+
+```python
+from browser_use import BrowserSession, BrowserProfile
+
+# 黑名单
+profile = BrowserProfile(prohibited_domains=['facebook.com', '*.ads.com'])
+
+# 白名单（仅允许）
+profile = BrowserProfile(allowed_domains=['google.com', 'github.com'])
+
+browser_session = BrowserSession(browser_profile=profile)
+agent = Agent(task="...", llm=llm, browser_session=browser_session)
+```
+
+### 自定义系统提示词
+
+```python
+# 扩展（追加）
+agent = Agent(task="...", llm=llm, extend_system_message="ALWAYS start at Wikipedia.")
+
+# 完全覆盖
+agent = Agent(task="...", llm=llm, override_system_message="You are a web scraper.")
+```
+
+### 视频录制
+
+```python
+browser = Browser(record_video_dir=Path('./recordings'))
+agent = Agent(task="...", llm=llm, browser=browser)
+await agent.run()  # 视频自动保存到 ./recordings/
+```
+
+### 历史记录重放与分析
+
+```python
+history = await agent.run()
+
+# 分析
+print(f"步数: {history.number_of_steps()}")
+print(f"耗时: {history.total_duration_seconds()}s")
+print(f"URL: {history.urls()}")
+print(f"错误: {history.errors()}")
+print(f"成本: ${history.usage.total_cost}" if history.usage else "N/A")
+
+# 保存 & 重放
+agent.save_history(Path('history.json'))
+
+new_agent = Agent(task='', llm=llm)
+await new_agent.load_and_rerun(
+    Path('history.json'),
+    variables={'email': 'new@example.com'}  # 替换变量
+)
+```
+
+### 分离提取模型（降低成本）
+
+```python
+agent = Agent(
+    task="Find and analyze HN posts",
+    llm=ChatOpenAI(model='gpt-4.1'),              # 主模型：强推理
+    page_extraction_llm=ChatOpenAI(model='gpt-4.1-mini')  # 提取：便宜快
+)
+```
+
+---
+
+## 5.3 Stagehand 进阶
+
+### 分页提取（循环翻页）
+
+```typescript
+const allProducts = [];
+
+while (true) {
+  const { products, hasNextPage } = await stagehand.extract(
+    "Extract products and check if there's a next page",
+    z.object({
+      products: z.array(z.object({ name: z.string(), price: z.number() })),
+      hasNextPage: z.boolean().describe("Is there a next page button?")
+    })
+  );
+  allProducts.push(...products);
+  if (!hasNextPage) break;
+  await stagehand.act("Click the next page button");
+  await new Promise(r => setTimeout(r, 1500));
+}
+```
+
+### 多页面管理
+
+```typescript
+const page1 = stagehand.context.pages()[0];
+await page1.goto("https://site-a.com");
+
+const page2 = await stagehand.context.newPage();
+await page2.goto("https://site-b.com");
+
+// 在不同页面提取数据
+const dataA = await stagehand.extract("Extract price", schema, { page: page1 });
+const dataB = await stagehand.extract("Extract price", schema, { page: page2 });
+```
+
+### 错误处理与回退
+
+```typescript
+try {
+  await stagehand.act("Click the delete button");
+  await stagehand.act("Confirm deletion");
+} catch (error) {
+  console.error("操作失败:", error.message);
+  await stagehand.act("Click Cancel if dialog is open");
+  await page.goto("https://app.example.com/dashboard");
+}
+```
+
+### Agent 结果分析
+
+```typescript
+const result = await agent.execute({ instruction: "...", maxSteps: 30 });
+
+console.log(result.message);      // 最终回答
+console.log(result.steps);        // 步骤列表
+console.log(result.completed);    // 是否完成
+if (result.usage) {
+  console.log(`Tokens: ${result.usage.promptTokens + result.usage.completionTokens}`);
+}
+```
+
+### Agent 超时中止
+
+```typescript
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 30000);  // 30 秒超时
+
+const result = await agent.execute({
+  instruction: "...",
+  signal: controller.signal
+});
+```
+
+### V3 vs V2 迁移速查
+
+| V2 | V3 | 变更 |
+|----|-----|------|
+| `modelName: "gpt-4o"` | `model: "openai/gpt-4o"` | 需加 provider/ 前缀 |
+| `stagehand.page` | `stagehand.context.pages()[0]` | 通过 context 获取 |
+| `stagehand.act({ action: "..." })` | `stagehand.act("...")` | 简化参数 |
+| `stagehand.extract({ instruction, schema })` | `stagehand.extract("...", schema)` | 两参数 |
+| 无缓存 | `enableCaching: true` | V3 新增 |
+| 无 Agent | `stagehand.agent()` | V3 新增 |
+
+---
+
+## 5.4 跨方案错误排查速查
+
+| 错误 | 方案 | 解决 |
+|------|------|------|
+| `ERR_MODULE_NOT_FOUND` | Playwright MCP | Node.js ≥18 |
+| `browser not found` | browser-use | `uvx browser-use install` |
+| `unsupported Node version` | Stagehand | Node ≥20.19.0 或 ≥22.12.0 |
+| `zod version conflict` | Stagehand | `npm install zod@^3.25.76` |
+| 浏览器启动失败 (Linux) | 所有 | 加 `--no-sandbox` |
+| 中文乱码 | 所有 | `apt install fonts-noto-cjk` + `LANG=C.UTF-8` |
+| Agent 死循环 | browser-use | `max_steps=50` + `flash_mode=True` |
+| act() 定位失败 | Stagehand | `observe()` + `act()` 或 `enableCaching: false` |
+| Token 爆增 | browser-use | `max_history_items=10` + `page_extraction_llm` |
+
+### 调试命令
+
+```bash
+# Playwright MCP
+PWMCP_DEBUG=1 npx @playwright/mcp@latest
+
+# browser-use
+BROWSER_USE_LOGGING_LEVEL=DEBUG python script.py
+
+# Stagehand
+new Stagehand({ verbose: 2 })
 ```
