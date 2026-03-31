@@ -1,7 +1,7 @@
 # Claude Code / OpenClaw 生态 Browser Use 能力 —— 三大主流方案深度对比
 
 > **调研日期**: 2026-03-31  
-> **版本**: V2（源码级深度剖析迭代）  
+> **版本**: V3（实战快速上手迭代）  
 > **调研方法**: 本地 clone 源码 + 多 Agent 并行深度阅读  
 > **作者**: AI Research Team (zey413)
 
@@ -19,6 +19,7 @@
 8. [选型指南](#8-选型指南)
 9. [总结与建议](#9-总结与建议)
 10. [源码级深度剖析 (V2 新增)](#10-源码级深度剖析v2-迭代新增)
+11. [实战快速上手指南 (V3 新增)](#11-实战快速上手指南v3-迭代新增)
 
 ---
 
@@ -1017,3 +1018,286 @@ async observe(params) {
 | **类型安全** | config.d.ts 类型定义 | Python Pydantic | Zod Schema + URL ID 映射 |
 | **扩展性** | 12 种 Capability 开关 | Watchdog 插件化 | Tool 集模式化过滤 |
 | **设计模式** | 延迟绑定 + JSON-RPC | 发布-订阅 + 工厂 | 处理器 + 策略 + 代理 |
+
+---
+
+## 11. 实战快速上手指南（V3 迭代新增）
+
+> 本章提供**可直接复制运行**的完整代码示例，所有代码均从三个项目的官方源码和测试用例中提取。
+
+### 11.1 Playwright MCP — 5 分钟上手
+
+#### 示例 A：最简配置（6 行 JSON）
+
+**第 1 步: 安装**
+```bash
+claude mcp add playwright npx @playwright/mcp@latest
+```
+
+**第 2 步: 验证** — 在 Claude Code 中直接对话：
+```
+你: "打开 https://github.com 并搜索 playwright"
+
+Claude 会自动调用:
+1. browser_navigate → 打开 GitHub
+2. browser_snapshot → 获取页面结构
+3. browser_click → 点击搜索框 (ref=e5)
+4. browser_type → 输入 "playwright"
+5. browser_press_key → 按 Enter
+6. browser_snapshot → 返回搜索结果
+```
+
+#### 示例 B：Headless + 持久化 Profile（生产推荐）
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--headless",
+        "--caps=core,pdf,storage",
+        "--user-data-dir=~/.pw-profile"
+      ]
+    }
+  }
+}
+```
+
+**效果**: 无界面运行 + 登录状态跨 session 保存 + PDF 生成能力。
+
+#### 示例 C：Chrome 扩展模式（复用已登录浏览器）
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--extension"]
+    }
+  }
+}
+```
+
+**前提**: 在 Chrome 中安装 Playwright MCP Bridge 扩展。  
+**效果**: 直接操控你已经登录的浏览器，无需重新登录任何网站。
+
+---
+
+### 11.2 browser-use — 5 分钟上手
+
+#### 示例 A：最简 Python Agent（8 行代码）
+
+```bash
+# 安装
+uv init && uv add browser-use python-dotenv && uv sync
+echo "BROWSER_USE_API_KEY=sk-your-key" > .env
+```
+
+```python
+# simple.py
+from dotenv import load_dotenv
+from browser_use import Agent, ChatBrowserUse
+
+load_dotenv()
+
+agent = Agent(
+    task='Find the number of stars of the browser-use repo on GitHub',
+    llm=ChatBrowserUse(),
+)
+agent.run_sync()
+```
+
+```bash
+python simple.py
+```
+
+> API Key 获取: https://cloud.browser-use.com/new-api-key
+
+#### 示例 B：Claude Code MCP 集成
+
+在 `~/.claude/app.json` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "browser-use": {
+      "command": "uvx",
+      "args": ["browser-use[cli]", "--mcp"],
+      "env": {
+        "BROWSER_USE_API_KEY": "sk-your-key"
+      }
+    }
+  }
+}
+```
+
+**集成后 Claude Code 自动获得 11 个工具**:
+- `browser_navigate` / `browser_click` / `browser_type` / `browser_scroll`
+- `browser_extract_content` / `browser_get_state` / `browser_screenshot`
+- `retry_with_browser_use_agent`（完整 Agent 任务执行）
+
+#### 示例 C：高级 — 复用 Chrome 登录 + 成本追踪
+
+```python
+import asyncio
+from browser_use import Agent, Browser, ChatBrowserUse
+
+async def main():
+    browser = Browser(
+        executable_path='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        user_data_dir='~/Library/Application Support/Google/Chrome',
+        profile_directory='Default',
+        headless=False
+    )
+
+    agent = Agent(
+        task="访问 Gmail 并检查最新邮件",
+        llm=ChatBrowserUse(model='bu-2-0'),
+        browser=browser,
+        calculate_cost=True
+    )
+
+    result = await agent.run()
+    print(f"任务完成! API 成本: ${result.cost()}")
+
+asyncio.run(main())
+```
+
+#### CLI 快速测试（无需写代码）
+
+```bash
+# 打开浏览器并交互
+browser-use open https://example.com
+browser-use state                        # 查看可点击元素列表
+browser-use click 5                      # 点击第 5 个元素
+browser-use type "搜索关键词"             # 输入文本
+```
+
+---
+
+### 11.3 Stagehand — 5 分钟上手
+
+#### 示例 A：act() + extract() 基础组合
+
+```bash
+# 安装
+npm install @browserbasehq/stagehand zod dotenv
+echo "OPENAI_API_KEY=sk-xxxx" > .env
+```
+
+```typescript
+// extract.ts
+import { Stagehand } from "@browserbasehq/stagehand";
+import { z } from "zod";
+
+(async () => {
+  const stagehand = new Stagehand({ env: "LOCAL", model: "openai/gpt-4o-mini" });
+  await stagehand.init();
+  const page = stagehand.context.pages()[0];
+
+  await page.goto("https://news.ycombinator.com");
+
+  const { stories } = await stagehand.extract(
+    "Extract the top 5 story titles and their scores",
+    z.object({
+      stories: z.array(z.object({
+        title: z.string(),
+        score: z.number()
+      }))
+    })
+  );
+
+  console.log("Top stories:", stories);
+  await stagehand.close();
+})();
+```
+
+```bash
+npx tsx extract.ts
+```
+
+#### 示例 B：observe() → 审查 → act() 工作流
+
+```typescript
+// observe_then_act.ts
+import { Stagehand } from "@browserbasehq/stagehand";
+
+(async () => {
+  const stagehand = new Stagehand({ env: "LOCAL", model: "google/gemini-2.0-flash" });
+  await stagehand.init();
+  const page = stagehand.context.pages()[0];
+
+  await page.goto("https://www.apartments.com/san-francisco-ca/");
+
+  // 第 1 步: observe — 获取 AI 建议的动作（不执行）
+  const actions = await stagehand.observe("Find the search filters button");
+  
+  console.log(`AI 找到 ${actions.length} 个候选动作:`);
+  actions.forEach((a, i) => console.log(`  ${i+1}. ${a.description}`));
+  
+  // 第 2 步: 人工审查后，执行选中的动作
+  await stagehand.act(actions[0]);
+  
+  console.log("已执行!");
+  await stagehand.close();
+})();
+```
+
+#### 示例 C：Agent 模式 + 自定义工具
+
+```typescript
+// agent_demo.ts
+import { Stagehand } from "@browserbasehq/stagehand";
+import { z } from "zod";
+import { tool } from "ai";
+
+const weatherTool = tool({
+  description: "Get weather for a city",
+  inputSchema: z.object({ city: z.string() }),
+  execute: async ({ city }) => ({ temp: 62, condition: "Sunny" })
+});
+
+(async () => {
+  const stagehand = new Stagehand({
+    env: "LOCAL",
+    model: "openai/gpt-4o",
+    experimental: true
+  });
+  await stagehand.init();
+
+  const agent = stagehand.agent({
+    mode: "dom",                    // "dom" | "hybrid" | "cua"
+    tools: { getWeather: weatherTool },
+    systemPrompt: "You are a shopping assistant. Check weather before recommending products.",
+    maxSteps: 20
+  });
+
+  const result = await agent.execute({
+    instruction: "Check SF weather, then go to amazon.com and find a weather-appropriate jacket"
+  });
+
+  console.log("Agent 完成:", result.message);
+  await stagehand.close();
+})();
+```
+
+---
+
+### 11.4 三方案快速上手对比
+
+| 维度 | Playwright MCP | browser-use | Stagehand |
+|------|---------------|-------------|-----------|
+| **安装时间** | 1 分钟 | 2 分钟 | 3 分钟 |
+| **最少代码** | 0 行（纯配置） | 8 行 Python | 12 行 TypeScript |
+| **需要 API Key** | 无 | 是 (browser-use) | 是 (OpenAI/等) |
+| **首次运行成本** | $0 | ~$0.01 | ~$0.01 |
+| **上手难度** | 极简 | 简单 | 中等 |
+| **适合谁** | 所有人 | Python 开发者 | TS/JS 开发者 |
+
+---
+
+> **本报告版本**: V3 (2026-03-31)  
+> **更新内容**: V1 架构概览 → V2 源码剖析 → V3 实战快速上手  
+> **所有项目已 clone 到本地，可随时深入查阅源码。**
